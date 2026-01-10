@@ -97,8 +97,30 @@ final class ClaudeCodeManager: ObservableObject {
     private var permissionCheckTimer: Timer?
     /// Tracks tool IDs that we're waiting on for permission check
     private var pendingToolChecks: [String: Date] = [:]
+    /// Tracks tool names for permission-eligible tools
+    private var pendingToolNames: [String: String] = [:]
     /// Delay before assuming a tool needs permission (seconds)
-    private let permissionCheckDelay: TimeInterval = 2.5
+    private let permissionCheckDelay: TimeInterval = 5.0
+    /// Tools that typically require user permission or interaction
+    private let permissionEligibleTools: Set<String> = [
+        "Bash", "Write", "Edit", "Task", "NotebookEdit",  // File/system operations
+        "AskUserQuestion",                                  // User interaction
+        "WebSearch", "WebFetch"                            // Web operations (may need approval)
+    ]
+    /// Tools that are always auto-approved (never show permission indicator)
+    private let autoApprovedTools: Set<String> = ["Read", "Glob", "Grep", "LS", "TodoWrite"]
+
+    /// Check if a tool should be tracked for permission
+    private func isPermissionEligible(_ toolName: String) -> Bool {
+        // Auto-approved tools never need permission
+        if autoApprovedTools.contains(toolName) { return false }
+        // Explicit permission-eligible tools
+        if permissionEligibleTools.contains(toolName) { return true }
+        // MCP tools (external servers) may need permission
+        if toolName.hasPrefix("mcp__") { return true }
+        // Default: don't track (assume auto-approved)
+        return false
+    }
     /// Flag to disable permission tracking during history loading
     private var isLoadingHistory: Bool = false
 
@@ -873,6 +895,9 @@ final class ClaudeCodeManager: ObservableObject {
     private func startPermissionCheckForSession(sessionId: String, toolId: String, toolName: String) {
         guard isLoadingHistoryBySession[sessionId] != true else { return }
 
+        // Only track tools that typically require permission
+        guard isPermissionEligible(toolName) else { return }
+
         pendingToolChecksBySession[sessionId, default: [:]][toolId] = Date()
 
         permissionCheckTimer?.invalidate()
@@ -1365,7 +1390,11 @@ final class ClaudeCodeManager: ObservableObject {
     private func startPermissionCheck(toolId: String, toolName: String) {
         guard !isLoadingHistory else { return }
 
+        // Only track tools that typically require permission
+        guard isPermissionEligible(toolName) else { return }
+
         pendingToolChecks[toolId] = Date()
+        pendingToolNames[toolId] = toolName
 
         permissionCheckTimer?.invalidate()
         permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: permissionCheckDelay, repeats: true) { [weak self] _ in
@@ -1377,6 +1406,7 @@ final class ClaudeCodeManager: ObservableObject {
 
     private func clearPermissionCheck(toolId: String) {
         pendingToolChecks.removeValue(forKey: toolId)
+        pendingToolNames.removeValue(forKey: toolId)
 
         if state.needsPermission {
             if pendingToolChecks.isEmpty {
