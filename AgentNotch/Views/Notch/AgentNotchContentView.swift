@@ -5,6 +5,7 @@ struct AgentNotchContentView: View {
     @StateObject private var notchVM = NotchViewModel()
     @StateObject private var settings = AppSettings.shared
     @StateObject private var claudeCodeManager = ClaudeCodeManager.shared
+    @StateObject private var codexManager = CodexManager.shared
     @State private var isHovering = false
     @State private var hoverTask: Task<Void, Never>?
     @State private var sessionStart = Date()
@@ -34,6 +35,8 @@ struct AgentNotchContentView: View {
     private let startupBrightColor = Color(red: 0.75, green: 0.9, blue: 1.0)
     private let errorGlowColor = Color(red: 0.9, green: 0.2, blue: 0.2)
     private let errorBrightColor = Color(red: 1.0, green: 0.3, blue: 0.3)
+    private let codexGlowColor = Color(red: 0.1, green: 0.3, blue: 0.7)
+    private let codexBrightColor = Color(red: 0.2, green: 0.45, blue: 0.9)
 
     /// Show glow when there's recent activity (event within last 2 seconds)
     private var hasRecentActivity: Bool {
@@ -67,7 +70,13 @@ struct AgentNotchContentView: View {
     }
 
     private var activityGlowSource: TelemetrySource {
-        visibleToolCalls.first?.source ?? telemetryCoordinator.telemetrySource
+        // Only use a source if it's visible in settings
+        if let firstSource = visibleToolCalls.first?.source {
+            return firstSource
+        }
+        // Fallback to telemetry source only if that source is visible
+        let source = telemetryCoordinator.telemetrySource
+        return isSourceVisible(source) ? source : .claudeCode
     }
 
     private var activityGlowColor: Color {
@@ -92,6 +101,12 @@ struct AgentNotchContentView: View {
         visibleToolCalls.first?.isActive == true
     }
 
+    /// Check if agent is active for a source that's visible in settings
+    private var isAgentActiveForVisibleSource: Bool {
+        guard telemetryCoordinator.isAgentActive else { return false }
+        return isSourceVisible(telemetryCoordinator.telemetrySource)
+    }
+
     private var memeVideoURL: URL? {
         if let bundleURL = Bundle.main.url(forResource: "videoplayback", withExtension: "mp4") {
             return bundleURL
@@ -101,6 +116,44 @@ struct AgentNotchContentView: View {
 
     private var shouldShowMemeVideo: Bool {
         settings.showMemeVideo && memeVideoURL != nil && (hasActiveToolCall || isMemeGraceActive)
+    }
+
+    /// Determines if Claude Code has real activity (not just grace period)
+    private var claudeHasRealActivity: Bool {
+        !claudeCodeManager.state.activeTools.isEmpty
+            || claudeCodeManager.state.isThinking
+            || claudeCodeManager.sessionStates.values.contains { !$0.activeTools.isEmpty || $0.isThinking }
+    }
+
+    /// Determines if Codex has real activity (not just grace period)
+    private var codexHasRealActivity: Bool {
+        !codexManager.state.activeTools.isEmpty
+            || codexManager.state.isThinking
+            || codexManager.sessionStates.values.contains { !$0.activeTools.isEmpty || $0.isThinking }
+    }
+
+    /// Determines which glow color to use based on active source
+    private var currentGlowColor: Color {
+        if claudeHasRealActivity {
+            return activityGlowColor
+        } else if codexHasRealActivity {
+            return codexGlowColor
+        } else if codexManager.hasAnySessionActivity && !claudeCodeManager.hasAnySessionActivity {
+            return codexGlowColor
+        }
+        return activityGlowColor
+    }
+
+    /// Determines which bright color to use based on active source
+    private var currentBrightColor: Color {
+        if claudeHasRealActivity {
+            return activityBrightColor
+        } else if codexHasRealActivity {
+            return codexBrightColor
+        } else if codexManager.hasAnySessionActivity && !claudeCodeManager.hasAnySessionActivity {
+            return codexBrightColor
+        }
+        return activityBrightColor
     }
 
     var body: some View {
@@ -147,14 +200,14 @@ struct AgentNotchContentView: View {
                             glowColor: errorGlowColor,
                             brightColor: errorBrightColor
                         )
-                    } else if (showActivityGlow || (telemetryCoordinator.isAgentActive && hasActiveToolCall) || claudeCodeManager.hasAnySessionActivity)
+                    } else if (showActivityGlow || (isAgentActiveForVisibleSource && hasActiveToolCall) || claudeCodeManager.hasAnySessionActivity || codexManager.hasAnySessionActivity)
                                 && notchVM.notchState == .closed
                                 && !showCompletionNotice {
                         NotchGlowBorder(
                             topCornerRadius: topCornerRadius,
                             bottomCornerRadius: bottomCornerRadius,
-                            glowColor: claudeCodeManager.hasAnySessionActivity ? activityGlowColor : activityGlowColor,
-                            brightColor: claudeCodeManager.hasAnySessionActivity ? activityBrightColor : activityBrightColor
+                            glowColor: currentGlowColor,
+                            brightColor: currentBrightColor
                         )
                     }
                 }
@@ -175,6 +228,8 @@ struct AgentNotchContentView: View {
                 }
                 .onChange(of: telemetryCoordinator.isAgentActive) { wasActive, isActive in
                     if wasActive && !isActive {
+                        // Only handle completion if the source that finished is visible in settings
+                        guard isSourceVisible(telemetryCoordinator.telemetrySource) else { return }
                         // Agent just finished - trigger completion notice and stop glows
                         stopAllGlows()
                         handleAgentCompletion()
@@ -271,31 +326,64 @@ struct AgentNotchContentView: View {
             return nil
         }()
         let isClaudeActive = claudeCodeManager.hasAnySessionActivity
-        let isSessionIdle = claudeCodeManager.state.isSessionComplete && !isClaudeActive
+        let isClaudeSessionIdle = claudeCodeManager.state.isSessionComplete && !isClaudeActive
+
+        // Codex active tool (from JSONL parsing)
+        let codexActiveTool = codexManager.state.activeTools.first
+            ?? codexManager.sessionStates.values.compactMap { $0.activeTools.first }.first
+        // Recent completed Codex tool (within last 5 seconds)
+        let recentCodexTool: CodexToolExecution? = {
+            if let recent = codexManager.state.recentTools.first,
+               let endTime = recent.endTime,
+               Date().timeIntervalSince(endTime) < 5.0 {
+                return recent
+            }
+            return nil
+        }()
+        let isCodexActive = codexManager.hasAnySessionActivity
+
+        // Determine which source is active (prefer Codex if both, since it's newer)
+        let activeSource: TelemetrySource = isCodexActive ? .codex : (isClaudeActive ? .claudeCode : .unknown)
+        let isSessionIdle = isClaudeSessionIdle && !isCodexActive
 
         // Check if we have sessions (for context indicator)
-        let hasSessions = settings.showSessionDots
+        let hasClaudeSessions = settings.showSessionDots
             && settings.enableClaudeCodeJSONL
             && !claudeCodeManager.availableSessions.isEmpty
+        let hasCodexSessions = settings.showSessionDots
+            && settings.enableCodexJSONL
+            && !codexManager.availableSessions.isEmpty
+        let hasSessions = hasClaudeSessions || hasCodexSessions
         let hasActiveSessionDots = hasSessions
-            && claudeCodeManager.sessionStates.values.contains { $0.isActive || $0.needsPermission }
+            && (claudeCodeManager.sessionStates.values.contains { $0.isActive || $0.needsPermission }
+                || codexManager.sessionStates.values.contains { $0.isActive })
         let hasPermissionNeeded = settings.showPermissionIndicator && !claudeCodeManager.sessionsNeedingPermission.isEmpty
 
-        // Determine what tool to show (prefer active, then recent Claude tool)
-        let currentTool: ClaudeToolExecution? = claudeActiveTool ?? recentClaudeTool
-        let isThinking = isClaudeActive && currentTool == nil
+        // Determine what tool to show (prefer active Codex, then active Claude, then recent)
+        let currentClaudeTool: ClaudeToolExecution? = claudeActiveTool ?? recentClaudeTool
+        let currentCodexTool: CodexToolExecution? = codexActiveTool ?? recentCodexTool
+        let isThinking = (isClaudeActive && currentClaudeTool == nil) || (isCodexActive && currentCodexTool == nil)
+
+        // Get current tool name (prefer Codex if active, otherwise Claude)
+        let currentToolName: String? = {
+            if let codexTool = currentCodexTool, isCodexActive || codexActiveTool != nil {
+                return codexTool.toolName
+            }
+            return currentClaudeTool?.toolName
+        }()
+        let hasCurrentTool = currentToolName != nil
 
         // Determine what to show in left wing (show sessions indicator even when idle for context)
-        let showLeftWing = currentTool != nil || isThinking || hasSessions || isSessionIdle
+        let showLeftWing = hasCurrentTool || isThinking || hasSessions || isSessionIdle
 
         // Calculate wing widths (tool name up to 24 chars)
-        let toolNameWidth: CGFloat = currentTool.map { CGFloat(min($0.toolName.count, 24)) * 8 } ?? 0
+        let toolNameWidth: CGFloat = currentToolName.map { CGFloat(min($0.count, 24)) * 8 } ?? 0
         let thinkingWidth: CGFloat = 90 // Width for "Thinking..." text
         let leftWingWidth: CGFloat = showLeftWing
-            ? (currentTool != nil ? 51 + toolNameWidth : (isThinking ? 51 + thinkingWidth : (hasSessions ? 70 : 60)))
+            ? (hasCurrentTool ? 51 + toolNameWidth : (isThinking ? 51 + thinkingWidth : (hasSessions ? 70 : 60)))
             : 0
 
-        let rightWingWidth: CGFloat = (currentTool != nil || isThinking) ? 120
+        let rightWingWidth: CGFloat = (hasCurrentTool || isThinking) ? 120
             : (hasPermissionNeeded ? 100 : 0)
 
         // If nothing to show, just return the notch width
@@ -311,12 +399,13 @@ struct AgentNotchContentView: View {
                 // Left wing
                 if showLeftWing {
                     HStack(spacing: 6) {
-                        if hasSessions && currentTool == nil && !isThinking && !isSessionIdle {
+                        if hasSessions && !hasCurrentTool && !isThinking && !isSessionIdle {
                             // Show session count indicator when idle
-                            let sessionCount = claudeCodeManager.availableSessions.count
+                            let sessionCount = claudeCodeManager.availableSessions.count + codexManager.availableSessions.count
                             let hasActivity = hasActiveSessionDots
+                            let indicatorColor = hasActivity ? (isCodexActive ? codexGlowColor : activityGlowColor) : Color.gray
                             Circle()
-                                .fill(hasActivity ? activityGlowColor : Color.gray)
+                                .fill(indicatorColor)
                                 .frame(width: 6, height: 6)
                                 .opacity(hasActivity ? 1.0 : 0.5)
                             Text("\(sessionCount) session\(sessionCount == 1 ? "" : "s")")
@@ -331,15 +420,17 @@ struct AgentNotchContentView: View {
                             Text("Done")
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundColor(.green.opacity(0.9))
-                        } else if currentTool != nil || isThinking {
-                            // Claude orange indicator - only when active
+                        } else if hasCurrentTool || isThinking {
+                            // Source-specific indicator color
+                            let indicatorColor = activeSource == .codex ? codexGlowColor : activityGlowColor
+                            let isActive = isCodexActive || isClaudeActive
                             Circle()
-                                .fill(activityGlowColor)
+                                .fill(indicatorColor)
                                 .frame(width: 8, height: 8)
-                                .shadow(color: activityGlowColor.opacity(isClaudeActive ? 0.6 : 0.3), radius: isClaudeActive ? 3 : 1)
+                                .shadow(color: indicatorColor.opacity(isActive ? 0.6 : 0.3), radius: isActive ? 3 : 1)
 
-                            if let tool = currentTool {
-                                Text(tool.toolName)
+                            if let toolName = currentToolName {
+                                Text(toolName)
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundColor(.white.opacity(0.85))
                                     .lineLimit(1)
@@ -367,20 +458,62 @@ struct AgentNotchContentView: View {
                 // Right wing - tool info or status
                 if rightWingWidth > 0 {
                     Group {
-                        if let tool = currentTool {
+                        if let codexTool = currentCodexTool, isCodexActive || codexActiveTool != nil {
+                            // Codex tool info
                             HStack(spacing: 4) {
-                                if tool.isRunning {
+                                if codexTool.isRunning {
                                     ProgressView()
                                         .scaleEffect(0.3)
                                         .frame(width: 8, height: 8)
-                                    if let desc = tool.description {
+                                    if let arg = codexTool.argument {
+                                        Text(arg.prefix(20))
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.white.opacity(0.5))
+                                            .lineLimit(1)
+                                    }
+                                } else {
+                                    // Show session tokens for Codex (no per-tool tokens)
+                                    let tokenUsage = codexManager.state.tokenUsage
+                                    if tokenUsage.inputTokens > 0 {
+                                        HStack(spacing: 1) {
+                                            Image(systemName: "arrow.up")
+                                                .font(.system(size: 6, weight: .bold))
+                                                .foregroundColor(.green.opacity(0.8))
+                                            Text(formatTokenCount(tokenUsage.inputTokens))
+                                                .font(.system(size: 9, design: .monospaced))
+                                                .foregroundColor(.white.opacity(0.7))
+                                        }
+                                    }
+                                    if tokenUsage.outputTokens > 0 {
+                                        HStack(spacing: 1) {
+                                            Image(systemName: "arrow.down")
+                                                .font(.system(size: 6, weight: .bold))
+                                                .foregroundColor(.blue.opacity(0.8))
+                                            Text(formatTokenCount(tokenUsage.outputTokens))
+                                                .font(.system(size: 9, design: .monospaced))
+                                                .foregroundColor(.white.opacity(0.7))
+                                        }
+                                    }
+                                    Text(codexTool.formattedDuration)
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.white.opacity(0.6))
+                                }
+                            }
+                        } else if let claudeTool = currentClaudeTool {
+                            // Claude Code tool info
+                            HStack(spacing: 4) {
+                                if claudeTool.isRunning {
+                                    ProgressView()
+                                        .scaleEffect(0.3)
+                                        .frame(width: 8, height: 8)
+                                    if let desc = claudeTool.description {
                                         Text(desc.prefix(20))
                                             .font(.system(size: 9))
                                             .foregroundColor(.white.opacity(0.5))
                                             .lineLimit(1)
                                     }
                                 } else {
-                                    if let input = tool.inputTokens, input > 0 {
+                                    if let input = claudeTool.inputTokens, input > 0 {
                                         HStack(spacing: 1) {
                                             Image(systemName: "arrow.up")
                                                 .font(.system(size: 6, weight: .bold))
@@ -390,7 +523,7 @@ struct AgentNotchContentView: View {
                                                 .foregroundColor(.white.opacity(0.7))
                                         }
                                     }
-                                    if let output = tool.outputTokens, output > 0 {
+                                    if let output = claudeTool.outputTokens, output > 0 {
                                         HStack(spacing: 1) {
                                             Image(systemName: "arrow.down")
                                                 .font(.system(size: 6, weight: .bold))
@@ -400,7 +533,7 @@ struct AgentNotchContentView: View {
                                                 .foregroundColor(.white.opacity(0.7))
                                         }
                                     }
-                                    Text(tool.formattedDuration)
+                                    Text(claudeTool.formattedDuration)
                                         .font(.system(size: 9, design: .monospaced))
                                         .foregroundColor(.white.opacity(0.6))
                                 }
@@ -410,7 +543,10 @@ struct AgentNotchContentView: View {
                                 ProgressView()
                                     .scaleEffect(0.3)
                                     .frame(width: 8, height: 8)
-                                if let modelName = extractModelName(claudeCodeManager.state.model) {
+                                let modelName = isCodexActive
+                                    ? extractCodexModelName(codexManager.state.model)
+                                    : extractModelName(claudeCodeManager.state.model)
+                                if let modelName {
                                     Text(modelName)
                                         .font(.system(size: 9, weight: .medium))
                                         .foregroundColor(.white.opacity(0.5))
@@ -450,6 +586,22 @@ struct AgentNotchContentView: View {
         // Fallback: return second part if available (usually the model name)
         if parts.count > 1 {
             return String(parts[1]).capitalized
+        }
+        return nil
+    }
+
+    /// Extract model name from Codex model ID (e.g., "GPT-4" from "gpt-4-turbo")
+    private func extractCodexModelName(_ modelId: String) -> String? {
+        let id = modelId.lowercased()
+        if id.contains("o3") { return "o3" }
+        if id.contains("o1") { return "o1" }
+        if id.contains("gpt-4") { return "GPT-4" }
+        if id.contains("gpt-3") { return "GPT-3" }
+        if id.contains("codex") { return "Codex" }
+        // Fallback: first part
+        let parts = id.split(separator: "-")
+        if let first = parts.first {
+            return String(first).uppercased()
         }
         return nil
     }
@@ -519,11 +671,18 @@ struct AgentNotchContentView: View {
                     }
                 }
 
-                // Show Claude Code tools based on display mode
+                // Determine which tools to show (prefer Codex if active)
+                let codexTools = codexManager.state.activeTools + codexManager.state.recentTools
                 let claudeTools = claudeCodeManager.state.activeTools + claudeCodeManager.state.recentTools
+                let isCodexActive = codexManager.hasAnySessionActivity
+
                 if settings.toolDisplayMode == "singular" {
                     // Singular mode: show one detailed event
-                    if let currentTool = claudeTools.first {
+                    if isCodexActive, let currentTool = codexTools.first {
+                        NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
+                            SingularCodexToolDetailView(tool: currentTool, tokenUsage: codexManager.state.tokenUsage)
+                        }
+                    } else if let currentTool = claudeTools.first {
                         NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
                             SingularToolDetailView(tool: currentTool, tokenUsage: claudeCodeManager.state.tokenUsage)
                         }
@@ -534,7 +693,11 @@ struct AgentNotchContentView: View {
                     }
                 } else {
                     // List mode: show recent events list
-                    if !claudeTools.isEmpty {
+                    if isCodexActive && !codexTools.isEmpty {
+                        NotchSection(title: "Recent Tools (Codex)") {
+                            CodexToolListView(tools: codexTools, maxItems: 4)
+                        }
+                    } else if !claudeTools.isEmpty {
                         NotchSection(title: "Recent Tools") {
                             ClaudeToolListView(tools: claudeTools, maxItems: 4)
                         }
@@ -1288,7 +1451,9 @@ struct AgentNotchContentView: View {
 
         if hasActiveNow {
             completionDebounceTask?.cancel()
-        } else if hadActiveToolCalls || isCompletionEvent {
+        } else if isCompletionEvent {
+            // Only show completion peek for actual "Complete" tool calls from telemetry,
+            // not for every tool that finishes. JSONL tracking handles session completion separately.
             completionDebounceTask?.cancel()
             completionDebounceTask = Task {
                 try? await Task.sleep(for: .seconds(1))

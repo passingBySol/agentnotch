@@ -456,8 +456,9 @@ public final class TelemetryCoordinator: ObservableObject {
             return
         }
 
-        // Check for Codex-specific events
+        // Check for Codex-specific events (skip if Codex source is disabled)
         if let codexEvent = CodexEventType.from(eventName) {
+            guard AppSettings.shared.showSourceCodex else { return }
             if telemetrySource != .codex {
                 telemetrySource = .codex
             }

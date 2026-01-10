@@ -85,10 +85,25 @@ struct TelemetryGeneralSettingsTab: View {
                 Toggle("Show thinking state", isOn: $settings.showThinkingState)
                     .disabled(!settings.enableClaudeCodeJSONL)
 
-                Divider()
+                Text("Reads from ~/.claude to track sessions")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } header: {
+                Text("Claude Code")
+            }
 
+            Section {
+                Toggle("Enable JSONL session tracking", isOn: $settings.enableCodexJSONL)
+
+                Text("Reads from ~/.codex/sessions to track sessions")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } header: {
+                Text("OpenAI Codex")
+            }
+
+            Section {
                 Toggle("Show context progress bar", isOn: $settings.showContextProgress)
-                    .disabled(!settings.enableClaudeCodeJSONL)
 
                 Stepper(value: $settings.contextTokenLimit, in: 50_000...1_000_000, step: 50_000) {
                     HStack {
@@ -98,7 +113,6 @@ struct TelemetryGeneralSettingsTab: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                .disabled(!settings.enableClaudeCodeJSONL)
 
                 Divider()
 
@@ -107,13 +121,8 @@ struct TelemetryGeneralSettingsTab: View {
                     Text("Single detailed event").tag("singular")
                 }
                 .pickerStyle(.segmented)
-                .disabled(!settings.enableClaudeCodeJSONL)
-
-                Text("Reads from ~/.claude to track sessions")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
             } header: {
-                Text("Claude Code")
+                Text("Display")
             }
         }
         .formStyle(.grouped)

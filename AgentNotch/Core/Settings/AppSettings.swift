@@ -37,6 +37,9 @@ public final class AppSettings: ObservableObject {
     @AppStorage("showTodoList") public var showTodoList: Bool = true
     @AppStorage("showThinkingState") public var showThinkingState: Bool = true
 
+    // Codex JSONL Session Tracking
+    @AppStorage("enableCodexJSONL") public var enableCodexJSONL: Bool = true
+
     // Context and Display Settings
     @AppStorage("contextTokenLimit") public var contextTokenLimit: Int = 200_000
     @AppStorage("showContextProgress") public var showContextProgress: Bool = true
