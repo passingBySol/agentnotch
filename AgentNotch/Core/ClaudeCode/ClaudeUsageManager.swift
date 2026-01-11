@@ -212,7 +212,7 @@ final class ClaudeUsageManager: ObservableObject {
     // MARK: - Private Methods
 
     private func updateConfiguredState() {
-        isConfigured = sessionKey != nil && !sessionKey!.isEmpty
+        isConfigured = !(sessionKey?.isEmpty ?? true)
     }
 
     private func scheduleNextRefresh() {
