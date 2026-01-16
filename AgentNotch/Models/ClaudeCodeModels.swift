@@ -9,15 +9,26 @@ import Foundation
 
 // MARK: - Session Discovery
 
-/// Represents an active Claude Code IDE session from ~/.claude/ide/*.lock
+/// Represents an active Claude Code session (IDE or terminal)
 struct ClaudeSession: Identifiable, Codable, Equatable {
-    var id: String { workspaceFolders.first ?? "\(pid)" }
+    /// Session UUID from JSONL filename (e.g., "22f3c3ad-10f0-404c-8b39-8f173e5e5f7e")
+    /// For IDE sessions decoded from lock files, this may be nil and we generate a fallback ID
+    var sessionUUID: String?
 
     let pid: Int
     let workspaceFolders: [String]
     let ideName: String
     let transport: String?
     let runningInWindows: Bool?
+
+    /// Use session UUID as unique identifier, fallback to workspace+pid for IDE sessions
+    var id: String {
+        if let uuid = sessionUUID {
+            return uuid
+        }
+        // Fallback for IDE sessions without UUID
+        return "\(workspaceFolders.first ?? "unknown")-\(pid)"
+    }
 
     /// Derived from workspace path for project JSONL lookup
     /// Claude Code uses path with "/" replaced by "-" as the project directory name
@@ -29,10 +40,16 @@ struct ClaudeSession: Identifiable, Codable, Equatable {
             .replacingOccurrences(of: "/", with: "-")
     }
 
-    /// Display name for UI (last folder component)
+    /// Display name for UI (last folder component + truncated UUID or PID)
     var displayName: String {
         guard let workspace = workspaceFolders.first else { return "Unknown" }
-        return URL(fileURLWithPath: workspace).lastPathComponent
+        let folderName = URL(fileURLWithPath: workspace).lastPathComponent
+        if let uuid = sessionUUID {
+            let shortUUID = String(uuid.prefix(6))
+            return "\(folderName) (\(shortUUID))"
+        } else {
+            return "\(folderName) (pid:\(pid))"
+        }
     }
 }
 

@@ -176,31 +176,38 @@ final class ClaudeCodeManager: ObservableObject {
 
     /// Handle incoming notification from Claude Code hook
     private func handleClaudeNotification(_ notification: ClaudeNotification) {
-        guard let cwd = notification.cwd else { return }
-
         switch notification.notificationType {
         case .permissionPrompt:
-            markSessionNeedsPermission(cwd: cwd, toolName: notification.toolName)
+            markSessionNeedsPermission(sessionId: notification.sessionId, cwd: notification.cwd, toolName: notification.toolName)
         case .idlePrompt:
-            markSessionNeedsPermission(cwd: cwd, toolName: "User Input")
+            markSessionNeedsPermission(sessionId: notification.sessionId, cwd: notification.cwd, toolName: "User Input")
         case .stop:
-            clearSessionPermission(cwd: cwd)
+            clearSessionPermission(sessionId: notification.sessionId, cwd: notification.cwd)
         default:
             break
         }
     }
 
-    /// Find session matching the given working directory
-    private func findSession(forCwd cwd: String) -> ClaudeSession? {
-        availableSessions.first { session in
-            guard let workspace = session.workspaceFolders.first else { return false }
-            return workspace == cwd || cwd.hasPrefix(workspace)
+    /// Find session by UUID (preferred) or by working directory (fallback)
+    private func findSession(byId sessionId: String?, cwd: String?) -> ClaudeSession? {
+        // First try to match by session UUID
+        if let sessionId = sessionId,
+           let session = availableSessions.first(where: { $0.id == sessionId }) {
+            return session
         }
+        // Fallback to cwd matching
+        if let cwd = cwd {
+            return availableSessions.first { session in
+                guard let workspace = session.workspaceFolders.first else { return false }
+                return workspace == cwd || cwd.hasPrefix(workspace)
+            }
+        }
+        return nil
     }
 
-    /// Mark a session as needing permission based on its working directory
-    private func markSessionNeedsPermission(cwd: String, toolName: String?) {
-        if let session = findSession(forCwd: cwd) {
+    /// Mark a session as needing permission
+    private func markSessionNeedsPermission(sessionId: String?, cwd: String?, toolName: String?) {
+        if let session = findSession(byId: sessionId, cwd: cwd) {
             if var sessionState = sessionStates[session.id] {
                 sessionState.needsPermission = true
                 sessionState.pendingPermissionTool = toolName
@@ -222,8 +229,8 @@ final class ClaudeCodeManager: ObservableObject {
     }
 
     /// Clear permission state for a session based on its working directory
-    private func clearSessionPermission(cwd: String) {
-        if let session = findSession(forCwd: cwd) {
+    private func clearSessionPermission(sessionId: String?, cwd: String?) {
+        if let session = findSession(byId: sessionId, cwd: cwd) {
             if var sessionState = sessionStates[session.id] {
                 sessionState.needsPermission = false
                 sessionState.pendingPermissionTool = nil
@@ -292,27 +299,33 @@ final class ClaudeCodeManager: ObservableObject {
                         return fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
                     }
 
-                // Find projects with recently modified JSONL files (last 5 minutes)
+                // Find ALL recently modified JSONL files (last 5 minutes) - each is a separate session
                 let recentThreshold = Date().addingTimeInterval(-300) // 5 minutes
 
                 for projectDir in projectDirs {
-                    if let jsonlFile = findCurrentSessionFile(in: projectDir) {
+                    let workspacePath = projectDir.lastPathComponent
+                        .replacingOccurrences(of: "-", with: "/")
+
+                    // Find all JSONL files in this project directory
+                    let jsonlFiles = (try? fm.contentsOfDirectory(at: projectDir, includingPropertiesForKeys: [.contentModificationDateKey]))?.filter { $0.pathExtension == "jsonl" } ?? []
+
+                    for jsonlFile in jsonlFiles {
                         let attrs = try? fm.attributesOfItem(atPath: jsonlFile.path)
                         let modDate = attrs?[.modificationDate] as? Date ?? .distantPast
 
                         if modDate > recentThreshold {
-                            // Create a synthetic session for this terminal project
-                            let workspacePath = projectDir.lastPathComponent
-                                .replacingOccurrences(of: "-", with: "/")
+                            // Extract UUID from filename (e.g., "22f3c3ad-10f0-404c-8b39-8f173e5e5f7e.jsonl")
+                            let sessionUUID = jsonlFile.deletingPathExtension().lastPathComponent
 
                             let session = ClaudeSession(
+                                sessionUUID: sessionUUID,
                                 pid: 0,  // Terminal sessions don't have a single PID
                                 workspaceFolders: [workspacePath],
                                 ideName: "Terminal",
                                 transport: nil,
                                 runningInWindows: nil
                             )
-                            debugLog("[ClaudeCode] Terminal session: \(session.displayName) (modified \(Int(-modDate.timeIntervalSinceNow))s ago)")
+                            debugLog("[ClaudeCode] Session: \(session.displayName) (modified \(Int(-modDate.timeIntervalSinceNow))s ago)")
                             sessions.append(session)
                         }
                     }
@@ -325,13 +338,19 @@ final class ClaudeCodeManager: ObservableObject {
         debugLog("[ClaudeCode] Total sessions found: \(sessions.count)")
         availableSessions = sessions
 
-        if selectedSession == nil && sessions.count == 1 {
+        // Restore previously selected session from persistence
+        if selectedSession == nil,
+           !AppSettings.shared.selectedClaudeSessionId.isEmpty,
+           let saved = sessions.first(where: { $0.id == AppSettings.shared.selectedClaudeSessionId }) {
+            selectSession(saved)
+        } else if selectedSession == nil && sessions.count == 1 {
             selectSession(sessions[0])
         }
 
         if let selected = selectedSession,
            !sessions.contains(where: { $0.id == selected.id }) {
             selectedSession = nil
+            AppSettings.shared.selectedClaudeSessionId = ""
             state = ClaudeCodeState()
             stopWatchingSessionFile()
         }
@@ -356,11 +375,67 @@ final class ClaudeCodeManager: ObservableObject {
         guard session != selectedSession else { return }
 
         debugLog("[ClaudeCode] Selecting session: \(session.displayName)")
-        selectedSession = session
-        state = ClaudeCodeState()
-        state.cwd = session.workspaceFolders.first ?? ""
 
-        startWatchingSessionFile()
+        // Notify observers BEFORE mutations for immediate UI update
+        objectWillChange.send()
+
+        selectedSession = session
+        AppSettings.shared.selectedClaudeSessionId = session.id
+
+        // Check if we already have state for this session (don't reload history)
+        let hasExistingState = sessionStates[session.id] != nil
+
+        // Restore existing session state if available, otherwise create fresh
+        if let existingState = sessionStates[session.id] {
+            state = existingState
+            debugLog("[ClaudeCode] Restored state for session: todos=\(existingState.todos.count), tools=\(existingState.activeTools.count), active=\(existingState.activeTools.map { $0.toolName })")
+        } else {
+            state = ClaudeCodeState()
+            state.cwd = session.workspaceFolders.first ?? ""
+            debugLog("[ClaudeCode] Created fresh state for session")
+        }
+
+        // Only start file watching (which loads history) if we don't have existing state
+        // This prevents loadRecentHistory from clearing the state we just restored
+        if !hasExistingState {
+            startWatchingSessionFile()
+        }
+
+        // Send again after state is fully updated
+        objectWillChange.send()
+    }
+
+    /// Index of currently selected session in availableSessions array
+    var selectedSessionIndex: Int? {
+        guard let selected = selectedSession else { return nil }
+        return availableSessions.firstIndex(where: { $0.id == selected.id })
+    }
+
+    /// Navigate to next session (no wraparound - stops at last session)
+    func selectNextSession() {
+        guard !availableSessions.isEmpty else { return }
+
+        if let currentIndex = selectedSessionIndex {
+            let nextIndex = currentIndex + 1
+            // Don't wrap around - stop at last session
+            guard nextIndex < availableSessions.count else { return }
+            selectSession(availableSessions[nextIndex])
+        } else if let first = availableSessions.first {
+            selectSession(first)
+        }
+    }
+
+    /// Navigate to previous session (no wraparound - stops at first session)
+    func selectPreviousSession() {
+        guard !availableSessions.isEmpty else { return }
+
+        if let currentIndex = selectedSessionIndex {
+            // Don't wrap around - stop at first session
+            guard currentIndex > 0 else { return }
+            selectSession(availableSessions[currentIndex - 1])
+        } else if let first = availableSessions.first {
+            selectSession(first)
+        }
     }
 
     /// Manually refresh state
@@ -525,18 +600,27 @@ final class ClaudeCodeManager: ObservableObject {
             return
         }
 
-        // Try to find the project directory
-        var projectDir: URL?
+        // Try to find the specific JSONL file for this session
         var jsonlFile: URL?
 
-        // First try direct projectKey match
-        if let projectKey = session.projectKey {
+        // If we have a session UUID, look for that specific file
+        if let sessionUUID = session.sessionUUID, let projectKey = session.projectKey {
+            let projectDir = projectsDir.appendingPathComponent(projectKey)
+            let specificFile = projectDir.appendingPathComponent("\(sessionUUID).jsonl")
+            if FileManager.default.fileExists(atPath: specificFile.path) {
+                jsonlFile = specificFile
+                debugLog("[ClaudeCode]   - Found specific JSONL: \(specificFile.lastPathComponent)")
+            }
+        }
+
+        // Fallback: try to find the project directory and scan for files
+        if jsonlFile == nil, let projectKey = session.projectKey {
             debugLog("[ClaudeCode]   - Project key: \(projectKey)")
             let directPath = projectsDir.appendingPathComponent(projectKey)
+            // If no UUID, find most recent file (legacy behavior)
             if let file = findCurrentSessionFile(in: directPath) {
-                projectDir = directPath
                 jsonlFile = file
-                debugLog("[ClaudeCode]   - Found via direct match: \(directPath.path)")
+                debugLog("[ClaudeCode]   - Found via project key: \(file.lastPathComponent)")
             }
         }
 
@@ -555,8 +639,16 @@ final class ClaudeCodeManager: ObservableObject {
                     // Handle leading dash correctly (absolute paths start with /)
                     let normalizedDirPath = dirPath.hasPrefix("/") ? dirPath : "/" + dirPath
                     if normalizedDirPath.lowercased() == normalizedWorkspace {
-                        if let file = findCurrentSessionFile(in: dir) {
-                            projectDir = dir
+                        // If we have UUID, look for specific file; otherwise most recent
+                        if let sessionUUID = session.sessionUUID {
+                            let specificFile = dir.appendingPathComponent("\(sessionUUID).jsonl")
+                            if fm.fileExists(atPath: specificFile.path) {
+                                jsonlFile = specificFile
+                                debugLog("[ClaudeCode]   - Found specific file via scan: \(specificFile.lastPathComponent)")
+                                break
+                            }
+                        }
+                        if jsonlFile == nil, let file = findCurrentSessionFile(in: dir) {
                             jsonlFile = file
                             debugLog("[ClaudeCode]   - Found via scan: \(dir.path)")
                             break

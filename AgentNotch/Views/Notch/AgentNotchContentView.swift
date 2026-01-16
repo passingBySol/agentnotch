@@ -1,6 +1,61 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Horizontal Scroll Monitor for Session Navigation
+
+/// Monitors for horizontal scroll events using NSEvent local monitor
+final class HorizontalScrollMonitor {
+    private var monitor: Any?
+    private var accumulatedDeltaX: CGFloat = 0
+    private var lastNavigationTime: Date = .distantPast
+    var onHorizontalScroll: ((CGFloat) -> Void)?
+    var isEnabled: Bool = false
+
+    func start() {
+        guard monitor == nil else { return }
+
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self = self, self.isEnabled else { return event }
+
+            // Only capture horizontal scroll when it's dominant
+            if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) * 0.5 {
+                self.accumulatedDeltaX += event.scrollingDeltaX
+
+                // Trigger immediately when threshold is reached (no timer delay)
+                // Debounce at 250ms to prevent too-rapid switching
+                let now = Date()
+                if abs(self.accumulatedDeltaX) > 20 && now.timeIntervalSince(self.lastNavigationTime) > 0.25 {
+                    self.onHorizontalScroll?(self.accumulatedDeltaX)
+                    self.accumulatedDeltaX = 0
+                    self.lastNavigationTime = now
+                }
+
+                // Reset accumulation after a pause in scrolling
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.accumulatedDeltaX = 0
+                }
+
+                // Consume the event to prevent scrolling content
+                return nil
+            }
+
+            return event
+        }
+    }
+
+    func stop() {
+        if let monitor = monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+        accumulatedDeltaX = 0
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 struct AgentNotchContentView: View {
     @EnvironmentObject var telemetryCoordinator: TelemetryCoordinator
     @StateObject private var notchVM = NotchViewModel()
@@ -30,6 +85,10 @@ struct AgentNotchContentView: View {
     @State private var memeGraceTask: Task<Void, Never>?
     @State private var isMemeGraceActive = false
     @State private var toolCallUpdateTask: Task<Void, Never>?
+    @State private var dragOffset: CGFloat = 0
+    @State private var isDragging = false
+    @State private var lastScrollNavTime: Date = .distantPast
+    @State private var scrollMonitor = HorizontalScrollMonitor()
 
     private let animationSpring = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.8, blendDuration: 0)
     private let startupGlowColor = Color(red: 0.55, green: 0.8, blue: 0.9)
@@ -126,6 +185,48 @@ struct AgentNotchContentView: View {
             || claudeCodeManager.sessionStates.values.contains { !$0.activeTools.isEmpty || $0.isThinking }
     }
 
+    /// Session dots indicator for multiple Claude Code sessions
+    @ViewBuilder
+    private var sessionDotsIndicator: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<claudeCodeManager.availableSessions.count, id: \.self) { index in
+                let isSelected = index == claudeCodeManager.selectedSessionIndex
+                Circle()
+                    .fill(isSelected ? Color.orange : Color.white.opacity(0.3))
+                    .frame(width: isSelected ? 6 : 4, height: isSelected ? 6 : 4)
+                    .animation(.easeInOut(duration: 0.2), value: claudeCodeManager.selectedSessionIndex)
+            }
+        }
+    }
+
+    /// Session navigator with arrows and dots
+    @ViewBuilder
+    private var sessionNavigator: some View {
+        HStack(spacing: 6) {
+            // Left arrow
+            Button(action: { navigateToPreviousSession() }) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+
+            // Dots
+            sessionDotsIndicator
+
+            // Right arrow
+            Button(action: { navigateToNextSession() }) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color.white.opacity(0.1), in: Capsule())
+    }
+
     /// Determines if Codex has real activity (not just grace period)
     private var codexHasRealActivity: Bool {
         !codexManager.state.activeTools.isEmpty
@@ -186,6 +287,7 @@ struct AgentNotchContentView: View {
                 .onTapGesture {
                     notchVM.toggle()
                 }
+                .simultaneousGesture(swipeGesture)
                 .overlay {
                     if showStartupGlow && notchVM.notchState == .closed {
                         NotchGlowBorder(
@@ -238,7 +340,11 @@ struct AgentNotchContentView: View {
                 }
                 .onChange(of: claudeCodeManager.sessionsNeedingPermission.count) { oldCount, newCount in
                     if newCount > oldCount {
-                        // New permission request - show dropdown
+                        // New permission request - auto-switch to that session
+                        if let needingPermission = claudeCodeManager.sessionsNeedingPermission.first,
+                           needingPermission.id != claudeCodeManager.selectedSession?.id {
+                            claudeCodeManager.selectSession(needingPermission)
+                        }
                         triggerPermissionNotice()
                     } else if newCount == 0 {
                         // Permission granted/denied - hide notice
@@ -276,21 +382,49 @@ struct AgentNotchContentView: View {
             if settings.enableClaudeUsage && ClaudeUsageManager.shared.isConfigured {
                 ClaudeUsageManager.shared.startRefreshing()
             }
+            // Set up horizontal scroll monitor for session navigation
+            scrollMonitor.onHorizontalScroll = { [weak claudeCodeManager] deltaX in
+                // Ensure we run on main actor for proper SwiftUI updates
+                Task { @MainActor in
+                    guard let manager = claudeCodeManager else { return }
+                    // Navigate sessions based on scroll direction
+                    // Positive = scroll right = previous, Negative = scroll left = next
+                    if deltaX > 0 {
+                        manager.selectPreviousSession()
+                    } else {
+                        manager.selectNextSession()
+                    }
+                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                }
+            }
+            scrollMonitor.start()
+            updateScrollMonitorState()
         }
         .onDisappear {
             startupGlowTask?.cancel()
             memeAutoOpenTask?.cancel()
             memeGraceTask?.cancel()
             toolCallUpdateTask?.cancel()
+            scrollMonitor.stop()
+        }
+        .onChange(of: isHovering) { _, hovering in
+            updateScrollMonitorState()
+        }
+        .onChange(of: notchVM.notchState) { _, _ in
+            updateScrollMonitorState()
+        }
+        .onChange(of: claudeCodeManager.availableSessions.count) { _, _ in
+            updateScrollMonitorState()
         }
     }
 
     @ViewBuilder
     private var notchBody: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header - always visible
+            // Header - always visible, with higher z-index to stay above scrollable content
             notchHeader
                 .frame(height: notchVM.closedNotchSize.height)
+                .zIndex(1)
 
             // Expanded content
             if notchVM.notchState == .open {
@@ -625,6 +759,12 @@ struct AgentNotchContentView: View {
                         .font(.system(size: 10))
                         .foregroundColor(.white.opacity(0.6))
                         .lineLimit(1)
+
+                    // Session navigation (only when multiple sessions)
+                    if claudeCodeManager.availableSessions.count > 1 {
+                        Spacer().frame(width: 8)
+                        sessionNavigator
+                    }
                 }
             }
 
@@ -662,92 +802,99 @@ struct AgentNotchContentView: View {
     @ViewBuilder
     private var expandedContent: some View {
         VStack(spacing: 6) {
-            if shouldShowMemeVideo, let memeVideoURL {
-                NotchSection(title: "Meme Mode") {
-                    MemeVideoPlayerView(url: memeVideoURL)
-                }
-            }
+            // Scrollable content area for main content (tasks and tools)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 6) {
+                    if shouldShowMemeVideo, let memeVideoURL {
+                        NotchSection(title: "Meme Mode") {
+                            MemeVideoPlayerView(url: memeVideoURL)
+                        }
+                    }
 
-            if !shouldShowMemeVideo {
-                // Show todo list if enabled and has items
-                if settings.showTodoList && !claudeCodeManager.state.todos.isEmpty {
-                    NotchSection(title: "Current Tasks") {
-                        TodoListView(todos: claudeCodeManager.state.todos, maxItems: 4)
+                    if !shouldShowMemeVideo {
+                        // Show todo list if enabled and has items
+                        if settings.showTodoList && !claudeCodeManager.state.todos.isEmpty {
+                            NotchSection(title: "Current Tasks") {
+                                TodoListView(todos: claudeCodeManager.state.todos, maxItems: 8)
+                            }
+                        }
+
+                        // Determine which tools to show (prefer Codex if active)
+                        let codexTools = codexManager.state.activeTools + codexManager.state.recentTools
+                        let claudeTools = claudeCodeManager.state.activeTools + claudeCodeManager.state.recentTools
+                        let isCodexActive = codexManager.hasAnySessionActivity
+
+                        if settings.toolDisplayMode == "singular" {
+                            // Singular mode: show one detailed event
+                            if isCodexActive, let currentTool = codexTools.first {
+                                NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
+                                    SingularCodexToolDetailView(tool: currentTool, tokenUsage: codexManager.state.tokenUsage)
+                                }
+                            } else if let currentTool = claudeTools.first {
+                                NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
+                                    SingularToolDetailView(tool: currentTool, tokenUsage: claudeCodeManager.state.tokenUsage)
+                                }
+                            } else if let lastCall = visibleToolCalls.first {
+                                NotchSection(title: lastCall.isActive ? "Active Tool" : "Last Tool") {
+                                    SingularTelemetryToolView(toolCall: lastCall)
+                                }
+                            }
+                        } else {
+                            // List mode: show recent events list
+                            if isCodexActive && !codexTools.isEmpty {
+                                NotchSection(title: "Recent Tools (Codex)") {
+                                    CodexToolListView(tools: codexTools, maxItems: 4)
+                                }
+                            } else if !claudeTools.isEmpty {
+                                NotchSection(title: "Recent Tools") {
+                                    ClaudeToolListView(tools: claudeTools, maxItems: 4)
+                                }
+                            } else {
+                                NotchSection(title: "Recent Tools") {
+                                    ToolCallListView(toolCalls: Array(visibleToolCalls.prefix(4)))
+                                }
+                            }
+                        }
                     }
                 }
+            }
+            .scrollClipDisabled(false)
 
-                // Determine which tools to show (prefer Codex if active)
-                let codexTools = codexManager.state.activeTools + codexManager.state.recentTools
-                let claudeTools = claudeCodeManager.state.activeTools + claudeCodeManager.state.recentTools
-                let isCodexActive = codexManager.hasAnySessionActivity
-
-                if settings.toolDisplayMode == "singular" {
-                    // Singular mode: show one detailed event
-                    if isCodexActive, let currentTool = codexTools.first {
-                        NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
-                            SingularCodexToolDetailView(tool: currentTool, tokenUsage: codexManager.state.tokenUsage)
+            // Fixed footer section (not scrollable) - always visible at bottom
+            VStack(spacing: 6) {
+                // Permission badge above footer
+                if settings.showPermissionIndicator && !claudeCodeManager.sessionsNeedingPermission.isEmpty {
+                    PermissionNeededBadge(toolName: claudeCodeManager.state.pendingPermissionTool)
+                        .onTapGesture {
+                            claudeCodeManager.focusIDE()
                         }
-                    } else if let currentTool = claudeTools.first {
-                        NotchSection(title: currentTool.isRunning ? "Active Tool" : "Last Tool") {
-                            SingularToolDetailView(tool: currentTool, tokenUsage: claudeCodeManager.state.tokenUsage)
-                        }
-                    } else if let lastCall = visibleToolCalls.first {
-                        NotchSection(title: lastCall.isActive ? "Active Tool" : "Last Tool") {
-                            SingularTelemetryToolView(toolCall: lastCall)
-                        }
-                    }
-                } else {
-                    // List mode: show recent events list
-                    if isCodexActive && !codexTools.isEmpty {
-                        NotchSection(title: "Recent Tools (Codex)") {
-                            CodexToolListView(tools: codexTools, maxItems: 4)
-                        }
-                    } else if !claudeTools.isEmpty {
-                        NotchSection(title: "Recent Tools") {
-                            ClaudeToolListView(tools: claudeTools, maxItems: 4)
-                        }
-                    } else {
-                        NotchSection(title: "Recent Tools") {
-                            ToolCallListView(toolCalls: Array(visibleToolCalls.prefix(4)))
-                        }
-                    }
                 }
-            }
 
-            Spacer(minLength: 0)
+                // Context progress bar (with integrated API usage badges)
+                if settings.showContextProgress {
+                    ContextProgressBar(
+                        tokenUsage: claudeCodeManager.state.tokenUsage,
+                        contextLimit: settings.contextTokenLimit,
+                        showApiUsage: settings.enableClaudeUsage
+                    )
+                }
 
-            // Permission badge above footer
-            if settings.showPermissionIndicator && !claudeCodeManager.sessionsNeedingPermission.isEmpty {
-                PermissionNeededBadge(toolName: claudeCodeManager.state.pendingPermissionTool)
-                    .onTapGesture {
-                        claudeCodeManager.focusIDE()
-                    }
-            }
+                // Use Claude Code tokens when JSONL is source, otherwise use telemetry
+                let claudeTokens = claudeCodeManager.state.tokenUsage
+                let hasClaudeTokens = claudeTokens.inputTokens > 0 || claudeTokens.outputTokens > 0
+                let displayTokenTotal = hasClaudeTokens ? (claudeTokens.inputTokens + claudeTokens.outputTokens) : recentTokenTotal
+                let displayCacheTokens = hasClaudeTokens ? claudeTokens.cacheReadInputTokens : telemetryCoordinator.sessionCacheTokens
+                let displayCacheWriteTokens = hasClaudeTokens ? claudeTokens.cacheCreationInputTokens : 0
 
-            // Context progress bar (with integrated API usage badges)
-            if settings.showContextProgress {
-                ContextProgressBar(
-                    tokenUsage: claudeCodeManager.state.tokenUsage,
-                    contextLimit: settings.contextTokenLimit,
-                    showApiUsage: settings.enableClaudeUsage
+                NotchFooterView(
+                    sessionDuration: Date().timeIntervalSince(sessionStart),
+                    tokenTotal: displayTokenTotal,
+                    cacheReadTokens: displayCacheTokens,
+                    cacheWriteTokens: displayCacheWriteTokens,
+                    showTokenCount: settings.showNotchTokenCount,
+                    gitBranch: claudeCodeManager.state.gitBranch
                 )
             }
-
-            // Use Claude Code tokens when JSONL is source, otherwise use telemetry
-            let claudeTokens = claudeCodeManager.state.tokenUsage
-            let hasClaudeTokens = claudeTokens.inputTokens > 0 || claudeTokens.outputTokens > 0
-            let displayTokenTotal = hasClaudeTokens ? (claudeTokens.inputTokens + claudeTokens.outputTokens) : recentTokenTotal
-            let displayCacheTokens = hasClaudeTokens ? claudeTokens.cacheReadInputTokens : telemetryCoordinator.sessionCacheTokens
-            let displayCacheWriteTokens = hasClaudeTokens ? claudeTokens.cacheCreationInputTokens : 0
-
-            NotchFooterView(
-                sessionDuration: Date().timeIntervalSince(sessionStart),
-                tokenTotal: displayTokenTotal,
-                cacheReadTokens: displayCacheTokens,
-                cacheWriteTokens: displayCacheWriteTokens,
-                showTokenCount: settings.showNotchTokenCount,
-                gitBranch: claudeCodeManager.state.gitBranch
-            )
         }
         .padding(.horizontal, 14)
         .padding(.top, 6)
@@ -1320,6 +1467,75 @@ struct AgentNotchContentView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Session Swipe Navigation
+
+    private var swipeGesture: some Gesture {
+        DragGesture(minimumDistance: 30)
+            .onChanged { value in
+                // Only allow swipes when notch is open and hovering
+                guard notchVM.notchState == .open && isHovering else { return }
+                if abs(value.translation.width) > abs(value.translation.height) * 1.5 {
+                    isDragging = true
+                    dragOffset = value.translation.width
+                }
+            }
+            .onEnded { value in
+                guard notchVM.notchState == .open && isHovering else { return }
+                isDragging = false
+                let threshold: CGFloat = 40
+                let velocity = value.predictedEndTranslation.width - value.translation.width
+
+                // Swipe right = previous session, swipe left = next session
+                if value.translation.width > threshold || velocity > 150 {
+                    navigateToPreviousSession()
+                } else if value.translation.width < -threshold || velocity < -150 {
+                    navigateToNextSession()
+                }
+
+                withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.8)) {
+                    dragOffset = 0
+                }
+            }
+    }
+
+    private func navigateToNextSession() {
+        guard claudeCodeManager.availableSessions.count > 1 else { return }
+        claudeCodeManager.selectNextSession()
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+    }
+
+    private func navigateToPreviousSession() {
+        guard claudeCodeManager.availableSessions.count > 1 else { return }
+        claudeCodeManager.selectPreviousSession()
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+    }
+
+    /// Handle horizontal scroll from trackpad for session navigation
+    private func handleHorizontalScroll(deltaX: CGFloat) {
+        // Debounce - only allow navigation every 300ms
+        let now = Date()
+        guard now.timeIntervalSince(lastScrollNavTime) > 0.3 else { return }
+        lastScrollNavTime = now
+
+        // Positive deltaX = scroll right = show previous, Negative = scroll left = show next
+        if deltaX > 0 {
+            navigateToPreviousSession()
+        } else {
+            navigateToNextSession()
+        }
+    }
+
+    /// Update scroll monitor enabled state based on current UI state
+    private func updateScrollMonitorState() {
+        // Only enable horizontal scroll navigation when:
+        // 1. Notch is open (not closed or peeking)
+        // 2. Mouse is hovering over the notch
+        // 3. There are multiple sessions to navigate between
+        scrollMonitor.isEnabled = notchVM.notchState == .open
+            && isHovering
+            && claudeCodeManager.availableSessions.count > 1
     }
 
     private func updateMemeAutoOpen(isActive: Bool) {

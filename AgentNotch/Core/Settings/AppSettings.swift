@@ -38,6 +38,8 @@ public final class AppSettings: ObservableObject {
     @AppStorage("showThinkingState") public var showThinkingState: Bool = true
     /// Use timer-based fallback for permission detection (disable if using hooks)
     @AppStorage("useTimerPermissionFallback") public var useTimerPermissionFallback: Bool = false
+    /// Persist selected session ID across app restarts
+    @AppStorage("selectedClaudeSessionId") public var selectedClaudeSessionId: String = ""
 
     // Codex JSONL Session Tracking
     @AppStorage("enableCodexJSONL") public var enableCodexJSONL: Bool = true
