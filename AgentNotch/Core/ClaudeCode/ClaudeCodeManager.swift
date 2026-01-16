@@ -140,6 +140,11 @@ final class ClaudeCodeManager: ObservableObject {
     private var toolIdleTimer: Timer?
     private let toolIdleDelay: TimeInterval = 10.0
 
+    // MARK: - Notification Socket Server
+
+    /// Unix domain socket server for receiving Claude Code hook notifications
+    private let notificationServer = NotificationSocketServer()
+
     // MARK: - Initialization
 
     private init() {
@@ -151,6 +156,91 @@ final class ClaudeCodeManager: ObservableObject {
         debugLog("[ClaudeCode] ========================================")
         startSessionScanning()
         loadDailyStats()
+        startNotificationServer()
+    }
+
+    /// Start the Unix domain socket server for receiving hook notifications
+    private func startNotificationServer() {
+        notificationServer.onNotification = { [weak self] notification in
+            self?.handleClaudeNotification(notification)
+        }
+        notificationServer.onError = { error in
+            debugLog("[ClaudeCode] Notification server error: \(error)")
+        }
+        do {
+            try notificationServer.start()
+        } catch {
+            debugLog("[ClaudeCode] Failed to start notification server: \(error)")
+        }
+    }
+
+    /// Handle incoming notification from Claude Code hook
+    private func handleClaudeNotification(_ notification: ClaudeNotification) {
+        guard let cwd = notification.cwd else { return }
+
+        switch notification.notificationType {
+        case .permissionPrompt:
+            markSessionNeedsPermission(cwd: cwd, toolName: notification.toolName)
+        case .idlePrompt:
+            markSessionNeedsPermission(cwd: cwd, toolName: "User Input")
+        case .stop:
+            clearSessionPermission(cwd: cwd)
+        default:
+            break
+        }
+    }
+
+    /// Find session matching the given working directory
+    private func findSession(forCwd cwd: String) -> ClaudeSession? {
+        availableSessions.first { session in
+            guard let workspace = session.workspaceFolders.first else { return false }
+            return workspace == cwd || cwd.hasPrefix(workspace)
+        }
+    }
+
+    /// Mark a session as needing permission based on its working directory
+    private func markSessionNeedsPermission(cwd: String, toolName: String?) {
+        if let session = findSession(forCwd: cwd) {
+            if var sessionState = sessionStates[session.id] {
+                sessionState.needsPermission = true
+                sessionState.pendingPermissionTool = toolName
+                sessionStates[session.id] = sessionState
+            }
+
+            if selectedSession?.id == session.id {
+                state.needsPermission = true
+                state.pendingPermissionTool = toolName
+            }
+        } else {
+            // No matching session - update main state (hook is authoritative)
+            state.needsPermission = true
+            state.pendingPermissionTool = toolName ?? "Permission"
+        }
+
+        objectWillChange.send()
+        updateSessionsNeedingPermission()
+    }
+
+    /// Clear permission state for a session based on its working directory
+    private func clearSessionPermission(cwd: String) {
+        if let session = findSession(forCwd: cwd) {
+            if var sessionState = sessionStates[session.id] {
+                sessionState.needsPermission = false
+                sessionState.pendingPermissionTool = nil
+                sessionStates[session.id] = sessionState
+            }
+
+            if selectedSession?.id == session.id {
+                state.needsPermission = false
+                state.pendingPermissionTool = nil
+            }
+        } else {
+            state.needsPermission = false
+            state.pendingPermissionTool = nil
+        }
+
+        objectWillChange.send()
+        updateSessionsNeedingPermission()
     }
 
     // MARK: - Public Methods
@@ -893,6 +983,9 @@ final class ClaudeCodeManager: ObservableObject {
     }
 
     private func startPermissionCheckForSession(sessionId: String, toolId: String, toolName: String) {
+        // Skip timer-based detection if disabled (user has hooks set up)
+        guard AppSettings.shared.useTimerPermissionFallback else { return }
+
         guard isLoadingHistoryBySession[sessionId] != true else { return }
 
         // Only track tools that typically require permission
@@ -1388,6 +1481,9 @@ final class ClaudeCodeManager: ObservableObject {
     // MARK: - Permission Detection
 
     private func startPermissionCheck(toolId: String, toolName: String) {
+        // Skip timer-based detection if disabled (user has hooks set up)
+        guard AppSettings.shared.useTimerPermissionFallback else { return }
+
         guard !isLoadingHistory else { return }
 
         // Only track tools that typically require permission

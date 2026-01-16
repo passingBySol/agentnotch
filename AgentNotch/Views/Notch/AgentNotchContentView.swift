@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct AgentNotchContentView: View {
     @EnvironmentObject var telemetryCoordinator: TelemetryCoordinator
@@ -1605,6 +1606,11 @@ struct AgentNotchContentView: View {
 
         showPermissionNotice = true
         notchVM.peek(duration: 5.0)
+
+        // Play notification sound if enabled
+        if settings.enableSoundNotifications {
+            NSSound(named: NSSound.Name(settings.notificationSoundName))?.play()
+        }
 
         // Auto-hide after duration
         Task {

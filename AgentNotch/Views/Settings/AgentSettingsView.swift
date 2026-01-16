@@ -80,12 +80,16 @@ struct TelemetryGeneralSettingsTab: View {
                     .disabled(!settings.enableClaudeCodeJSONL)
                 Toggle("Show permission indicator", isOn: $settings.showPermissionIndicator)
                     .disabled(!settings.enableClaudeCodeJSONL)
+                Toggle("Play sound on permission request", isOn: $settings.enableSoundNotifications)
+                    .disabled(!settings.enableClaudeCodeJSONL || !settings.showPermissionIndicator)
                 Toggle("Show todo list", isOn: $settings.showTodoList)
                     .disabled(!settings.enableClaudeCodeJSONL)
                 Toggle("Show thinking state", isOn: $settings.showThinkingState)
                     .disabled(!settings.enableClaudeCodeJSONL)
+                Toggle("Timer-based permission fallback", isOn: $settings.useTimerPermissionFallback)
+                    .disabled(!settings.enableClaudeCodeJSONL || !settings.showPermissionIndicator)
 
-                Text("Reads from ~/.claude to track sessions")
+                Text("Reads from ~/.claude. For accurate notifications, set up Claude Code hooks (see project README).")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             } header: {

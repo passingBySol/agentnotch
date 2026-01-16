@@ -36,6 +36,8 @@ public final class AppSettings: ObservableObject {
     @AppStorage("showPermissionIndicator") public var showPermissionIndicator: Bool = true
     @AppStorage("showTodoList") public var showTodoList: Bool = true
     @AppStorage("showThinkingState") public var showThinkingState: Bool = true
+    /// Use timer-based fallback for permission detection (disable if using hooks)
+    @AppStorage("useTimerPermissionFallback") public var useTimerPermissionFallback: Bool = false
 
     // Codex JSONL Session Tracking
     @AppStorage("enableCodexJSONL") public var enableCodexJSONL: Bool = true
@@ -45,6 +47,10 @@ public final class AppSettings: ObservableObject {
     @AppStorage("showContextProgress") public var showContextProgress: Bool = true
     /// Display mode: "list" for recent events list, "singular" for single detailed event
     @AppStorage("toolDisplayMode") public var toolDisplayMode: String = "list"
+
+    // Notification Settings
+    @AppStorage("enableSoundNotifications") public var enableSoundNotifications: Bool = true
+    @AppStorage("notificationSoundName") public var notificationSoundName: String = "Blow"  // macOS system sound
 
     // Claude Usage Quota Tracking
     @AppStorage("enableClaudeUsage") public var enableClaudeUsage: Bool = false
