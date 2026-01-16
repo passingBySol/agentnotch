@@ -182,10 +182,41 @@ final class ClaudeCodeManager: ObservableObject {
         case .idlePrompt:
             markSessionNeedsPermission(sessionId: notification.sessionId, cwd: notification.cwd, toolName: "User Input")
         case .stop:
-            clearSessionPermission(sessionId: notification.sessionId, cwd: notification.cwd)
+            removeSession(sessionId: notification.sessionId, cwd: notification.cwd)
         default:
             break
         }
+    }
+
+    /// Remove a session when it ends (triggered by stop hook)
+    private func removeSession(sessionId: String?, cwd: String?) {
+        guard let session = findSession(byId: sessionId, cwd: cwd) else {
+            debugLog("[ClaudeCode] removeSession: no matching session found for id=\(sessionId ?? "nil"), cwd=\(cwd ?? "nil")")
+            return
+        }
+
+        debugLog("[ClaudeCode] Removing session: \(session.displayName)")
+
+        // Stop watching this session's file
+        stopWatchingSession(id: session.id)
+
+        // Remove from available sessions
+        availableSessions.removeAll { $0.id == session.id }
+
+        // If this was the selected session, clear selection
+        if selectedSession?.id == session.id {
+            selectedSession = nil
+            AppSettings.shared.selectedClaudeSessionId = ""
+            state = ClaudeCodeState()
+            stopWatchingSessionFile()
+
+            // Auto-select another session if available
+            if let nextSession = availableSessions.first {
+                selectSession(nextSession)
+            }
+        }
+
+        objectWillChange.send()
     }
 
     /// Find session by UUID (preferred) or by working directory (fallback)
@@ -250,6 +281,110 @@ final class ClaudeCodeManager: ObservableObject {
         updateSessionsNeedingPermission()
     }
 
+    // MARK: - Session End Detection
+
+    /// Check if a JSONL file represents an ended session by examining its content
+    /// Returns true if the session appears to have ended (should not be shown as active)
+    private func isSessionEnded(jsonlFile: URL, modDate: Date) -> Bool {
+        // If file was modified very recently (< 3 seconds), assume it's still active
+        let timeSinceModification = -modDate.timeIntervalSinceNow
+        if timeSinceModification < 3.0 {
+            return false
+        }
+
+        // Read the last portion of the file to check for end markers
+        guard let handle = try? FileHandle(forReadingFrom: jsonlFile) else {
+            return true // Can't read = assume ended
+        }
+        defer { try? handle.close() }
+
+        let fileSize = handle.seekToEndOfFile()
+        let bytesToRead: UInt64 = min(fileSize, 20 * 1024) // Last 20KB
+        let startPosition = fileSize > bytesToRead ? fileSize - bytesToRead : 0
+        handle.seek(toFileOffset: startPosition)
+
+        guard let data = try? handle.readToEnd(),
+              let content = String(data: data, encoding: .utf8) else {
+            return true
+        }
+
+        let lines = content.components(separatedBy: .newlines).filter { !$0.isEmpty }
+
+        // Check last few lines for end indicators
+        var lastStopReason: String?
+        var hasActiveToolUse = false
+        var toolUseIds = Set<String>()
+        var toolResultIds = Set<String>()
+        var wasInterrupted = false
+
+        // Only check last 20 lines for efficiency
+        let linesToCheck = lines.suffix(20)
+
+        for line in linesToCheck {
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+
+            // Check for interruption in toolUseResult
+            if let toolUseResult = json["toolUseResult"] {
+                let resultStr = "\(toolUseResult)"
+                if resultStr.contains("interrupted by user") || resultStr.contains("Request interrupted") {
+                    wasInterrupted = true
+                }
+            }
+
+            // Parse message content
+            if let message = json["message"] as? [String: Any] {
+                // Check stop_reason
+                if let stopReason = message["stop_reason"] as? String {
+                    lastStopReason = stopReason
+                }
+
+                // Track tool_use and tool_result to detect hanging tools
+                if let content = message["content"] as? [[String: Any]] {
+                    for item in content {
+                        if let type = item["type"] as? String {
+                            if type == "tool_use", let id = item["id"] as? String {
+                                toolUseIds.insert(id)
+                            } else if type == "tool_result", let id = item["tool_use_id"] as? String {
+                                toolResultIds.insert(id)
+                            } else if type == "text", let text = item["text"] as? String {
+                                if text.contains("[Request interrupted by user") {
+                                    wasInterrupted = true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for unfinished tool calls
+        hasActiveToolUse = !toolUseIds.subtracting(toolResultIds).isEmpty
+
+        // Session is ended if:
+        // 1. Was interrupted by user
+        // 2. Last stop_reason is "end_turn" AND no active tools AND file is old enough (> 30 seconds)
+        if wasInterrupted {
+            debugLog("[ClaudeCode] Session ended: interrupted - \(jsonlFile.lastPathComponent)")
+            return true
+        }
+
+        if lastStopReason == "end_turn" && !hasActiveToolUse && timeSinceModification > 30.0 {
+            debugLog("[ClaudeCode] Session ended: end_turn + idle 30s - \(jsonlFile.lastPathComponent)")
+            return true
+        }
+
+        // If file hasn't been modified in 2+ minutes and has no active tools, consider it ended
+        if timeSinceModification > 120.0 && !hasActiveToolUse {
+            debugLog("[ClaudeCode] Session ended: idle 2min - \(jsonlFile.lastPathComponent)")
+            return true
+        }
+
+        return false
+    }
+
     // MARK: - Public Methods
 
     /// Scan for active Claude Code sessions
@@ -310,10 +445,18 @@ final class ClaudeCodeManager: ObservableObject {
                     let jsonlFiles = (try? fm.contentsOfDirectory(at: projectDir, includingPropertiesForKeys: [.contentModificationDateKey]))?.filter { $0.pathExtension == "jsonl" } ?? []
 
                     for jsonlFile in jsonlFiles {
+                        // Skip agent files
+                        if jsonlFile.lastPathComponent.hasPrefix("agent-") { continue }
+
                         let attrs = try? fm.attributesOfItem(atPath: jsonlFile.path)
                         let modDate = attrs?[.modificationDate] as? Date ?? .distantPast
 
                         if modDate > recentThreshold {
+                            // Check if the session has actually ended by examining file content
+                            if isSessionEnded(jsonlFile: jsonlFile, modDate: modDate) {
+                                continue // Skip ended sessions
+                            }
+
                             // Extract UUID from filename (e.g., "22f3c3ad-10f0-404c-8b39-8f173e5e5f7e.jsonl")
                             let sessionUUID = jsonlFile.deletingPathExtension().lastPathComponent
 
