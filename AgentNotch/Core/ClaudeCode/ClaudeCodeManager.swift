@@ -176,92 +176,70 @@ final class ClaudeCodeManager: ObservableObject {
 
     /// Handle incoming notification from Claude Code hook
     private func handleClaudeNotification(_ notification: ClaudeNotification) {
-        debugLog("[ClaudeCode] Hook notification: \(notification.notificationType?.rawValue ?? "unknown")")
+        guard let cwd = notification.cwd else { return }
 
         switch notification.notificationType {
         case .permissionPrompt:
-            // Find matching session by cwd and mark as needing permission
-            if let cwd = notification.cwd {
-                markSessionNeedsPermission(cwd: cwd, toolName: notification.toolName)
-            }
-
+            markSessionNeedsPermission(cwd: cwd, toolName: notification.toolName)
         case .idlePrompt:
-            // Claude is waiting for user input
-            if let cwd = notification.cwd {
-                markSessionNeedsPermission(cwd: cwd, toolName: "User Input")
-            }
-
+            markSessionNeedsPermission(cwd: cwd, toolName: "User Input")
         case .stop:
-            // Session finished - clear permission state
-            if let cwd = notification.cwd {
-                clearSessionPermission(cwd: cwd)
-            }
-
+            clearSessionPermission(cwd: cwd)
         default:
             break
         }
     }
 
+    /// Find session matching the given working directory
+    private func findSession(forCwd cwd: String) -> ClaudeSession? {
+        availableSessions.first { session in
+            guard let workspace = session.workspaceFolders.first else { return false }
+            return workspace == cwd || cwd.hasPrefix(workspace)
+        }
+    }
+
     /// Mark a session as needing permission based on its working directory
     private func markSessionNeedsPermission(cwd: String, toolName: String?) {
-        debugLog("[ClaudeCode] markSessionNeedsPermission called: cwd=\(cwd), tool=\(toolName ?? "nil")")
-        debugLog("[ClaudeCode] Available sessions: \(availableSessions.count), selected: \(selectedSession?.id.prefix(8) ?? "none")")
-
-        // Find session matching this cwd
-        for session in availableSessions {
-            if session.workspaceFolders.first == cwd || cwd.hasPrefix(session.workspaceFolders.first ?? "///") {
-                if var sessionState = sessionStates[session.id] {
-                    sessionState.needsPermission = true
-                    sessionState.pendingPermissionTool = toolName
-                    sessionStates[session.id] = sessionState
-                    debugLog("[ClaudeCode] Session \(session.id.prefix(8))... needs permission for \(toolName ?? "unknown")")
-                }
-
-                // Also update main state if this is the selected session
-                if selectedSession?.id == session.id {
-                    state.needsPermission = true
-                    state.pendingPermissionTool = toolName
-                }
-
-                objectWillChange.send()
-                updateSessionsNeedingPermission()
-                return
+        if let session = findSession(forCwd: cwd) {
+            if var sessionState = sessionStates[session.id] {
+                sessionState.needsPermission = true
+                sessionState.pendingPermissionTool = toolName
+                sessionStates[session.id] = sessionState
             }
+
+            if selectedSession?.id == session.id {
+                state.needsPermission = true
+                state.pendingPermissionTool = toolName
+            }
+        } else {
+            // No matching session - update main state (hook is authoritative)
+            state.needsPermission = true
+            state.pendingPermissionTool = toolName ?? "Permission"
         }
 
-        // Always update main state when receiving hook notification (hook is authoritative)
-        debugLog("[ClaudeCode] No matching session found, updating main state anyway")
-        state.needsPermission = true
-        state.pendingPermissionTool = toolName ?? "Permission"
         objectWillChange.send()
         updateSessionsNeedingPermission()
     }
 
     /// Clear permission state for a session based on its working directory
     private func clearSessionPermission(cwd: String) {
-        objectWillChange.send()
-
-        for session in availableSessions {
-            if session.workspaceFolders.first == cwd || cwd.hasPrefix(session.workspaceFolders.first ?? "///") {
-                if var sessionState = sessionStates[session.id] {
-                    sessionState.needsPermission = false
-                    sessionState.pendingPermissionTool = nil
-                    sessionStates[session.id] = sessionState
-                }
-
-                if selectedSession?.id == session.id {
-                    state.needsPermission = false
-                    state.pendingPermissionTool = nil
-                }
-
-                updateSessionsNeedingPermission()
-                return
+        if let session = findSession(forCwd: cwd) {
+            if var sessionState = sessionStates[session.id] {
+                sessionState.needsPermission = false
+                sessionState.pendingPermissionTool = nil
+                sessionStates[session.id] = sessionState
             }
+
+            if selectedSession?.id == session.id {
+                state.needsPermission = false
+                state.pendingPermissionTool = nil
+            }
+        } else {
+            state.needsPermission = false
+            state.pendingPermissionTool = nil
         }
 
-        // Clear selected session as fallback
-        state.needsPermission = false
-        state.pendingPermissionTool = nil
+        objectWillChange.send()
         updateSessionsNeedingPermission()
     }
 

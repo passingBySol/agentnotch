@@ -127,7 +127,6 @@ final class NotificationSocketServer {
     private func startAcceptLoop() {
         acceptQueue.async { [weak self] in
             guard let self = self else { return }
-            debugLog("[NotificationSocket] Accept loop started")
 
             while self.isRunning && self.serverSocket >= 0 {
                 var clientAddr = sockaddr_un()
@@ -140,98 +139,69 @@ final class NotificationSocketServer {
                 }
 
                 if clientSocket >= 0 {
-                    debugLog("[NotificationSocket] Client connected, fd=\(clientSocket)")
                     self.handleClient(clientSocket)
                 } else if errno == EAGAIN || errno == EWOULDBLOCK {
-                    // No connection waiting, sleep briefly
                     Thread.sleep(forTimeInterval: 0.1)
                 } else if errno != EINTR {
-                    // Real error
-                    debugLog("[NotificationSocket] Accept error: \(String(cString: strerror(errno)))")
-                    self.onError?("Accept error: \(String(cString: strerror(errno)))")
+                    let errorMsg = String(cString: strerror(errno))
+                    debugLog("[NotificationSocket] Accept error: \(errorMsg)")
+                    self.onError?("Accept error: \(errorMsg)")
                     break
                 }
             }
-            debugLog("[NotificationSocket] Accept loop ended")
         }
     }
 
     private func handleClient(_ clientSocket: Int32) {
-        debugLog("[NotificationSocket] handleClient called for fd=\(clientSocket)")
-
         // Set client socket to non-blocking
         let flags = fcntl(clientSocket, F_GETFL)
         fcntl(clientSocket, F_SETFL, flags | O_NONBLOCK)
 
         clientQueue.async { [weak self] in
-            debugLog("[NotificationSocket] async block started for fd=\(clientSocket)")
-
-            defer {
-                close(clientSocket)
-                debugLog("[NotificationSocket] Client fd=\(clientSocket) closed")
-            }
+            defer { close(clientSocket) }
 
             var buffer = [UInt8](repeating: 0, count: 65536)
             var data = Data()
-
-            // Read all data from client with short timeout
             var attempts = 0
-            while attempts < 10 {
+            let maxAttempts = 10
+
+            while attempts < maxAttempts {
                 let bytesRead = read(clientSocket, &buffer, buffer.count)
-                debugLog("[NotificationSocket] read() returned \(bytesRead), errno=\(errno)")
+
                 if bytesRead > 0 {
                     data.append(contentsOf: buffer[0..<bytesRead])
-                    debugLog("[NotificationSocket] Read \(bytesRead) bytes, total=\(data.count)")
-                    attempts = 0  // Reset on successful read
+                    attempts = 0
                 } else if bytesRead == 0 {
-                    // Connection closed by client
-                    debugLog("[NotificationSocket] Connection closed by client")
                     break
                 } else if errno == EAGAIN || errno == EWOULDBLOCK {
-                    // No data available yet
-                    if !data.isEmpty {
-                        // We have some data, wait briefly for more
-                        Thread.sleep(forTimeInterval: 0.01)
-                        attempts += 1
-                    } else {
-                        // No data yet, wait a bit longer
-                        Thread.sleep(forTimeInterval: 0.05)
-                        attempts += 1
-                    }
+                    let sleepInterval = data.isEmpty ? 0.05 : 0.01
+                    Thread.sleep(forTimeInterval: sleepInterval)
+                    attempts += 1
                 } else {
-                    // Real error
                     debugLog("[NotificationSocket] Read error: \(String(cString: strerror(errno)))")
                     break
                 }
             }
 
-            debugLog("[NotificationSocket] Done reading, data.count=\(data.count)")
             if !data.isEmpty {
-                debugLog("[NotificationSocket] Processing data: \(String(decoding: data, as: UTF8.self))")
                 self?.processData(data)
-            } else {
-                debugLog("[NotificationSocket] No data received")
             }
         }
     }
 
     private func processData(_ data: Data) {
-        // Handle newline-delimited JSON (multiple notifications in one connection)
         let text = String(decoding: data, as: UTF8.self)
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
 
-        for line in lines {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = line.data(using: .utf8) else { continue }
 
             do {
                 let notification = try JSONDecoder().decode(ClaudeNotification.self, from: lineData)
-                debugLog("[NotificationSocket] Received: \(notification.notificationType?.rawValue ?? "unknown") - \(notification.message ?? "")")
-
                 DispatchQueue.main.async { [weak self] in
                     self?.onNotification?(notification)
                 }
             } catch {
-                debugLog("[NotificationSocket] Failed to parse notification: \(error), raw: \(line)")
+                debugLog("[NotificationSocket] Parse error: \(error)")
                 onError?("Failed to parse notification: \(error)")
             }
         }
