@@ -66,9 +66,81 @@ brew install --cask agentnotch
 2. Unzip and drag `AgentNotch.app` to `/Applications`
 3. Open AgentNotch
 
+### Build from Source
+
+**Requirements:** Xcode 15+ with Command Line Tools
+
+```bash
+# Clone the repository
+git clone https://github.com/AppGram/agentnotch.git
+cd agentnotch
+
+# Build Release (unsigned, for local use)
+xcodebuild -project AgentNotch.xcodeproj \
+  -scheme AgentNotch \
+  -configuration Release \
+  -derivedDataPath build \
+  CODE_SIGN_IDENTITY="-" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO
+
+# Copy to Applications
+cp -R build/Build/Products/Release/AgentNotch.app /Applications/
+```
+
+### Start at Login
+
+To have AgentNotch start automatically when you log in:
+
+1. Open **System Settings** > **General** > **Login Items**
+2. Click **+** under "Open at Login"
+3. Navigate to `/Applications/AgentNotch.app` and add it
+
+Or via command line:
+```bash
+osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/AgentNotch.app", hidden:false}'
+```
+
 ## Usage
 
 ### Setup with Claude Code
+
+#### Option 1: Hooks (Recommended)
+
+For instant permission notifications, add hooks to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat | nc -w 1 -U /tmp/agentnotch.sock 2>/dev/null; exit 0"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"notification_type\":\"stop\",\"cwd\":\"'\"$PWD\"'\"}' | nc -w 1 -U /tmp/agentnotch.sock 2>/dev/null; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+See [hooks/README.md](hooks/README.md) for more details and troubleshooting.
+
+#### Option 2: OTLP Telemetry
 
 Add to your Claude Code configuration to send telemetry:
 
