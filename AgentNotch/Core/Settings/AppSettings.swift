@@ -50,9 +50,11 @@ public final class AppSettings: ObservableObject {
     /// Display mode: "list" for recent events list, "singular" for single detailed event
     @AppStorage("toolDisplayMode") public var toolDisplayMode: String = "list"
 
-    // Notification Settings
-    @AppStorage("enableSoundNotifications") public var enableSoundNotifications: Bool = true
-    @AppStorage("notificationSoundName") public var notificationSoundName: String = "Blow"  // macOS system sound
+    // Notification Settings - Separate sounds for permission vs user input
+    @AppStorage("enablePermissionSound") public var enablePermissionSound: Bool = true
+    @AppStorage("permissionSoundName") public var permissionSoundName: String = "Blow"
+    @AppStorage("enableUserInputSound") public var enableUserInputSound: Bool = true
+    @AppStorage("userInputSoundName") public var userInputSoundName: String = "Submarine"
 
     // Claude Usage Quota Tracking
     @AppStorage("enableClaudeUsage") public var enableClaudeUsage: Bool = false
