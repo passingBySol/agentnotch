@@ -80,8 +80,45 @@ struct TelemetryGeneralSettingsTab: View {
                     .disabled(!settings.enableClaudeCodeJSONL)
                 Toggle("Show permission indicator", isOn: $settings.showPermissionIndicator)
                     .disabled(!settings.enableClaudeCodeJSONL)
-                Toggle("Play sound on permission request", isOn: $settings.enableSoundNotifications)
-                    .disabled(!settings.enableClaudeCodeJSONL || !settings.showPermissionIndicator)
+
+                // Permission sound settings
+                HStack {
+                    Toggle("Permission sound", isOn: $settings.enablePermissionSound)
+                    Spacer()
+                    Picker("", selection: $settings.permissionSoundName) {
+                        ForEach(SoundManager.availableSounds, id: \.self) { sound in
+                            Text(sound).tag(sound)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 100)
+                    .disabled(!settings.enablePermissionSound)
+                    Button(action: { SoundManager.shared.preview(settings.permissionSoundName) }) {
+                        Image(systemName: "speaker.wave.2")
+                    }
+                    .disabled(!settings.enablePermissionSound)
+                }
+                .disabled(!settings.enableClaudeCodeJSONL || !settings.showPermissionIndicator)
+
+                // User input sound settings
+                HStack {
+                    Toggle("User input sound", isOn: $settings.enableUserInputSound)
+                    Spacer()
+                    Picker("", selection: $settings.userInputSoundName) {
+                        ForEach(SoundManager.availableSounds, id: \.self) { sound in
+                            Text(sound).tag(sound)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 100)
+                    .disabled(!settings.enableUserInputSound)
+                    Button(action: { SoundManager.shared.preview(settings.userInputSoundName) }) {
+                        Image(systemName: "speaker.wave.2")
+                    }
+                    .disabled(!settings.enableUserInputSound)
+                }
+                .disabled(!settings.enableClaudeCodeJSONL || !settings.showPermissionIndicator)
+
                 Toggle("Show todo list", isOn: $settings.showTodoList)
                     .disabled(!settings.enableClaudeCodeJSONL)
                 Toggle("Show thinking state", isOn: $settings.showThinkingState)

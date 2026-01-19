@@ -1823,10 +1823,9 @@ struct AgentNotchContentView: View {
         showPermissionNotice = true
         notchVM.peek(duration: 5.0)
 
-        // Play notification sound if enabled
-        if settings.enableSoundNotifications {
-            NSSound(named: NSSound.Name(settings.notificationSoundName))?.play()
-        }
+        // Play notification sound - differentiate between permission and user input
+        let isUserInput = permissionToolName == "User Input"
+        SoundManager.shared.playNotificationSound(isUserInput: isUserInput, settings: settings)
 
         // Auto-hide after duration
         Task {
