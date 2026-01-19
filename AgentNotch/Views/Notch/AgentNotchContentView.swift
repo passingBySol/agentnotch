@@ -190,11 +190,13 @@ struct AgentNotchContentView: View {
     private var sessionDotsIndicator: some View {
         HStack(spacing: 4) {
             ForEach(0..<claudeCodeManager.availableSessions.count, id: \.self) { index in
+                let session = claudeCodeManager.availableSessions[index]
                 let isSelected = index == claudeCodeManager.selectedSessionIndex
                 Circle()
                     .fill(isSelected ? Color.orange : Color.white.opacity(0.3))
                     .frame(width: isSelected ? 6 : 4, height: isSelected ? 6 : 4)
                     .animation(.easeInOut(duration: 0.2), value: claudeCodeManager.selectedSessionIndex)
+                    .help("\(session.displayName)\n\(session.workspaceFolders.first ?? "")")
             }
         }
     }
@@ -967,6 +969,20 @@ struct AgentNotchContentView: View {
                         Text("Claude wants to run: \(toolName)")
                             .font(.system(size: 11))
                             .foregroundColor(.white.opacity(0.7))
+                    }
+
+                    // Session info
+                    if let session = claudeCodeManager.sessionsNeedingPermission.first {
+                        Text(session.displayName)
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.5))
+                        if let path = session.workspaceFolders.first {
+                            Text(path)
+                                .font(.system(size: 9))
+                                .foregroundColor(.white.opacity(0.4))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
                 }
 
