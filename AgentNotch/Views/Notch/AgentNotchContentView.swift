@@ -190,14 +190,40 @@ struct AgentNotchContentView: View {
     private var sessionDotsIndicator: some View {
         HStack(spacing: 4) {
             ForEach(0..<claudeCodeManager.availableSessions.count, id: \.self) { index in
-                let session = claudeCodeManager.availableSessions[index]
                 let isSelected = index == claudeCodeManager.selectedSessionIndex
                 Circle()
                     .fill(isSelected ? Color.orange : Color.white.opacity(0.3))
                     .frame(width: isSelected ? 6 : 4, height: isSelected ? 6 : 4)
                     .animation(.easeInOut(duration: 0.2), value: claudeCodeManager.selectedSessionIndex)
-                    .help("\(session.displayName)\n\(session.workspaceFolders.first ?? "")")
             }
+        }
+    }
+
+    /// Session info display showing current session name and path
+    @ViewBuilder
+    private var sessionInfoDisplay: some View {
+        if let session = claudeCodeManager.selectedSession {
+            HStack(spacing: 6) {
+                Image(systemName: "folder")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.orange.opacity(0.7))
+
+                Text(session.displayName)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white.opacity(0.7))
+
+                if let path = session.workspaceFolders.first {
+                    Text(path)
+                        .font(.system(size: 9, weight: .regular))
+                        .foregroundColor(.white.opacity(0.4))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
         }
     }
 
@@ -880,6 +906,9 @@ struct AgentNotchContentView: View {
                         showApiUsage: settings.enableClaudeUsage
                     )
                 }
+
+                // Session info display (below context bar)
+                sessionInfoDisplay
 
                 // Use Claude Code tokens when JSONL is source, otherwise use telemetry
                 let claudeTokens = claudeCodeManager.state.tokenUsage
